@@ -303,4 +303,6 @@ func initAPI() {
 	beego.Router("/scim/*", &controllers.RootController{}, "*:HandleScim")
 
 	beego.Router("/api/faceid-signin-begin", &controllers.ApiController{}, "GET:FaceIDSigninBegin")
+
+	beego.Router("/cas/third-party/validate", &controllers.RootController{}, "POST:ThirdPartyValidate")
 }
