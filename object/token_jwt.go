@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/casdoor/casdoor/conf"
 	"github.com/casdoor/casdoor/util"
 	"github.com/golang-jwt/jwt/v4"
 )
@@ -259,6 +260,117 @@ func getUserWithoutThirdIdp(user *User) *UserWithoutThirdIdp {
 	return res
 }
 
+func addStructFieldsToMapClaims(v interface{}, mapClaims *jwt.MapClaims) {
+	val := reflect.ValueOf(v).Elem()
+	for i := 0; i < val.NumField(); i++ {
+		field := val.Type().Field(i)
+		fieldName := field.Tag.Get("json")
+		if fieldName == "" {
+			fieldName = field.Name
+		}
+		(*mapClaims)[fieldName] = val.Field(i).Interface()
+	}
+}
+
+func mergeThirdPartyClaims(tokenType string, tokenScope string, claims jwt.Claims, application *Application, user *User) jwt.MapClaims {
+	res := jwt.MapClaims{}
+
+	switch c := claims.(type) {
+	case jwt.MapClaims:
+		for key, value := range c {
+			res[key] = value
+		}
+	case ClaimsShort:
+		if c.UserShort != nil {
+			addStructFieldsToMapClaims(c.UserShort, &res)
+		}
+
+		res["iss"] = c.RegisteredClaims.Issuer
+		res["sub"] = c.RegisteredClaims.Subject
+		res["aud"] = c.RegisteredClaims.Audience
+		res["exp"] = c.RegisteredClaims.ExpiresAt
+		res["nbf"] = c.RegisteredClaims.NotBefore
+		res["iat"] = c.RegisteredClaims.IssuedAt
+		res["jti"] = c.RegisteredClaims.ID
+		res["tokenType"] = c.TokenType
+		res["nonce"] = c.Nonce
+		res["scope"] = c.Scope
+	case ClaimsWithoutThirdIdp:
+		if c.UserWithoutThirdIdp != nil {
+			addStructFieldsToMapClaims(c.UserWithoutThirdIdp, &res)
+		}
+
+		res["iss"] = c.RegisteredClaims.Issuer
+		res["sub"] = c.RegisteredClaims.Subject
+		res["aud"] = c.RegisteredClaims.Audience
+		res["exp"] = c.RegisteredClaims.ExpiresAt
+		res["nbf"] = c.RegisteredClaims.NotBefore
+		res["iat"] = c.RegisteredClaims.IssuedAt
+		res["jti"] = c.RegisteredClaims.ID
+		res["tokenType"] = c.TokenType
+		res["nonce"] = c.Nonce
+		res["scope"] = c.Scope
+		res["tag"] = c.Tag
+	case ClaimsStandard:
+		if c.UserShort != nil {
+			addStructFieldsToMapClaims(c.UserShort, &res)
+		}
+
+		res["iss"] = c.RegisteredClaims.Issuer
+		res["sub"] = c.RegisteredClaims.Subject
+		res["aud"] = c.RegisteredClaims.Audience
+		res["exp"] = c.RegisteredClaims.ExpiresAt
+		res["nbf"] = c.RegisteredClaims.NotBefore
+		res["iat"] = c.RegisteredClaims.IssuedAt
+		res["jti"] = c.RegisteredClaims.ID
+		res["gender"] = c.Gender
+		res["tokenType"] = c.TokenType
+		res["nonce"] = c.Nonce
+		res["scope"] = c.Scope
+		res["address"] = c.Address
+	default:
+		fmt.Printf("Unknown claims type: %T\n", claims)
+	}
+
+	hasuraClaims := make(map[string]interface{})
+
+	if conf.GetConfigBool("useHasuraJwtClaims") {
+		anonymousRole := fmt.Sprintf("%s/%s/%s", application.Organization, application.Name, "anonymous")
+		hasuraClaims["x-hasura-scope"] = tokenScope
+		hasuraClaims["x-hasura-organization"] = application.Organization
+		hasuraClaims["x-hasura-application"] = application.Name
+		hasuraClaims["x-hasura-client-id"] = application.ClientId
+		hasuraClaims["x-hasura-token-type"] = tokenType
+		hasuraClaims["x-hasura-allowed-roles"] = []string{anonymousRole}
+		hasuraClaims["x-hasura-default-role"] = anonymousRole
+		hasuraClaims["x-hasura-user-id"] = ""
+		hasuraClaims["x-hasura-user-tag"] = ""
+
+		if tokenType == "application" {
+			clientRole := fmt.Sprintf("%s/%s/%s", application.Organization, application.Name, "client")
+			hasuraClaims["x-hasura-default-role"] = clientRole
+			hasuraClaims["x-hasura-allowed-roles"] = []string{clientRole}
+		} else if tokenType == "normal-user" {
+			roleNames := make([]string, len(user.Roles))
+			defaultRoleName := ""
+			for i, role := range user.Roles {
+				roleNames[i] = fmt.Sprintf("%s/%s/%s", application.Organization, application.Name, role.Name)
+			}
+			if len(roleNames) > 0 {
+				defaultRoleName = roleNames[0]
+			}
+			hasuraClaims["x-hasura-allowed-roles"] = roleNames
+			hasuraClaims["x-hasura-default-role"] = defaultRoleName
+			hasuraClaims["x-hasura-user-id"] = user.Id
+			hasuraClaims["x-hasura-user-tag"] = user.Tag
+		}
+
+		res["https://hasura.io/jwt/claims"] = hasuraClaims
+	}
+
+	return res
+}
+
 func getShortClaims(claims Claims) ClaimsShort {
 	res := ClaimsShort{
 		UserShort:        getShortUser(claims.User),
@@ -376,21 +488,27 @@ func generateJwtToken(application *Application, user *User, nonce string, scope 
 	if application.TokenFormat == "JWT" {
 		claimsWithoutThirdIdp := getClaimsWithoutThirdIdp(claims)
 
-		token = jwt.NewWithClaims(jwt.SigningMethodRS256, claimsWithoutThirdIdp)
+		mergeClaims := mergeThirdPartyClaims(claims.Type, claims.Scope, claimsWithoutThirdIdp, application, user)
+
+		token = jwt.NewWithClaims(jwt.SigningMethodRS256, mergeClaims)
 		claimsWithoutThirdIdp.ExpiresAt = jwt.NewNumericDate(refreshExpireTime)
 		claimsWithoutThirdIdp.TokenType = "refresh-token"
 		refreshToken = jwt.NewWithClaims(jwt.SigningMethodRS256, claimsWithoutThirdIdp)
 	} else if application.TokenFormat == "JWT-Empty" {
 		claimsShort := getShortClaims(claims)
 
-		token = jwt.NewWithClaims(jwt.SigningMethodRS256, claimsShort)
+		mergeClaims := mergeThirdPartyClaims(claims.Type, claims.Scope, claimsShort, application, user)
+
+		token = jwt.NewWithClaims(jwt.SigningMethodRS256, mergeClaims)
 		claimsShort.ExpiresAt = jwt.NewNumericDate(refreshExpireTime)
 		claimsShort.TokenType = "refresh-token"
 		refreshToken = jwt.NewWithClaims(jwt.SigningMethodRS256, claimsShort)
 	} else if application.TokenFormat == "JWT-Custom" {
 		claimsCustom := getClaimsCustom(claims, application.TokenFields)
 
-		token = jwt.NewWithClaims(jwt.SigningMethodRS256, claimsCustom)
+		mergeClaims := mergeThirdPartyClaims(claims.Type, claims.Scope, claimsCustom, application, user)
+
+		token = jwt.NewWithClaims(jwt.SigningMethodRS256, mergeClaims)
 		refreshClaims := getClaimsCustom(claims, application.TokenFields)
 		refreshClaims["exp"] = jwt.NewNumericDate(refreshExpireTime)
 		refreshClaims["TokenType"] = "refresh-token"
@@ -398,7 +516,9 @@ func generateJwtToken(application *Application, user *User, nonce string, scope 
 	} else if application.TokenFormat == "JWT-Standard" {
 		claimsStandard := getStandardClaims(claims)
 
-		token = jwt.NewWithClaims(jwt.SigningMethodRS256, claimsStandard)
+		mergeClaims := mergeThirdPartyClaims(claims.Type, claims.Scope, claimsStandard, application, user)
+
+		token = jwt.NewWithClaims(jwt.SigningMethodRS256, mergeClaims)
 		claimsStandard.ExpiresAt = jwt.NewNumericDate(refreshExpireTime)
 		claimsStandard.TokenType = "refresh-token"
 		refreshToken = jwt.NewWithClaims(jwt.SigningMethodRS256, claimsStandard)
