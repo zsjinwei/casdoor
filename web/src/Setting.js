@@ -56,6 +56,8 @@ export const Countries = [
   {label: "Українська", key: "uk", country: "UA", alt: "Українська"},
   {label: "Қазақ", key: "kk", country: "KZ", alt: "Қазақ"},
   {label: "فارسی", key: "fa", country: "IR", alt: "فارسی"},
+  {label: "Čeština", key: "cs", country: "CZ", alt: "Čeština"},
+  {label: "Slovenčina", key: "sk", country: "SK", alt: "Slovenčina"},
 ];
 
 export function getThemeData(organization, application) {
@@ -1367,6 +1369,13 @@ export function getTag(color, text, icon) {
 
 export function getApplicationName(application) {
   return `${application?.owner}/${application?.name}`;
+}
+
+export function getApplicationDisplayName(application) {
+  if (application.isShared) {
+    return `${application.name}(Shared)`;
+  }
+  return application.name;
 }
 
 export function getRandomName() {
